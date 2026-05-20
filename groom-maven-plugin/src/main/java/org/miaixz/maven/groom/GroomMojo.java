@@ -80,6 +80,7 @@ import org.apache.maven.settings.Settings;
 import org.miaixz.maven.groom.cifriendly.CiInterpolator;
 import org.miaixz.maven.groom.cifriendly.CiModelInterpolator;
 import org.miaixz.maven.groom.extendedinterpolation.ExtendedModelInterpolator;
+import org.miaixz.maven.groom.extendedinterpolation.ExtendedStringSearchModelInterpolator;
 import org.miaixz.maven.groom.model.resolution.GroomModelResolver;
 import org.codehaus.plexus.util.StringUtils;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
@@ -183,6 +184,30 @@ public class GroomMojo extends AbstractGroomMojo {
             "distributionManagement");
 
     /**
+     * Public project metadata elements whose Maven project expressions can be resolved without touching inherited build
+     * plugin configuration.
+     */
+    private static final List<PomProperty<?>> PROJECT_EXPRESSION_PROPERTIES = Arrays.asList(
+            PomProperty.GROUP_ID,
+            PomProperty.ARTIFACT_ID,
+            PomProperty.VERSION,
+            PomProperty.PACKAGING,
+            PomProperty.NAME,
+            PomProperty.DESCRIPTION,
+            PomProperty.URL,
+            PomProperty.INCEPTION_YEAR,
+            PomProperty.ORGANIZATION,
+            PomProperty.LICENSES,
+            PomProperty.DEVELOPERS,
+            PomProperty.CONTRIBUTORS,
+            PomProperty.MAILING_LISTS,
+            PomProperty.SCM,
+            PomProperty.ISSUE_MANAGEMENT,
+            PomProperty.CI_MANAGEMENT,
+            PomProperty.DISTRIBUTION_MANAGEMENT,
+            PomProperty.PREREQUISITES);
+
+    /**
      * The {@link Settings} used to get active profile properties.
      */
     @Parameter(defaultValue = "${settings}", readonly = true, required = true)
@@ -202,10 +227,10 @@ public class GroomMojo extends AbstractGroomMojo {
 
     /**
      * The flag indicating whether the generated groomed POM should replace the current project POM for later lifecycle
-     * goals. The default value is always <code>false</code>; release pipelines must enable it explicitly with
-     * <code>-Dgroom.updatePomFile=true</code> or the matching plugin configuration.
+     * goals. The default value is <code>true</code>, so install and deploy goals use the generated groomed POM unless
+     * callers explicitly disable it with <code>-Dgroom.updatePomFile=false</code> or the matching plugin configuration.
      */
-    @Parameter(property = "groom.updatePomFile", defaultValue = "false")
+    @Parameter(property = "groom.updatePomFile", defaultValue = "true")
     private boolean updatePomFile;
 
     /**
@@ -328,6 +353,18 @@ public class GroomMojo extends AbstractGroomMojo {
     private boolean resolveProjectVersion;
 
     /**
+     * Resolves Maven project expressions in public project metadata while leaving build plugin configuration untouched.
+     */
+    @Parameter(property = "groom.resolveProjectExpressions", defaultValue = "false")
+    private boolean resolveProjectExpressions;
+
+    /**
+     * Command line override for active {@code build/plugins} handling under {@code pomElements}.
+     */
+    @Parameter(property = "groom.pomElements.buildPlugins")
+    private ElementHandling buildPlugins;
+
+    /**
      * Effective setting that removes explicit {@code compile} dependency scopes from the generated POM.
      */
     private boolean effectiveCompileScopeRemoval;
@@ -344,10 +381,9 @@ public class GroomMojo extends AbstractGroomMojo {
     private DirectDependenciesInheritanceAssembler inheritanceAssembler;
 
     /**
-     * The {@link ModelInterpolator} used to resolve variables.
+     * The {@link ModelInterpolator} used to resolve variables outside CI-friendly-only mode.
      */
-    @Inject
-    private ExtendedModelInterpolator extendedModelInterpolator;
+    private final ExtendedModelInterpolator extendedModelInterpolator = new ExtendedStringSearchModelInterpolator();
 
     /**
      * The {@link ModelInterpolator} used to resolve variables.
@@ -463,7 +499,23 @@ public class GroomMojo extends AbstractGroomMojo {
      */
     @Override
     protected boolean shouldSkipGoal() {
-        return skipGroom;
+        if (skipGroom) {
+            return true;
+        }
+        return shouldSkipPomPackagedModulePublishExecution();
+    }
+
+    /**
+     * Tests whether a module publication execution is running on a POM-packaged parent project.
+     *
+     * @return {@code true} when the execution should be skipped for the current POM-packaged project
+     */
+    private boolean shouldSkipPomPackagedModulePublishExecution() {
+        if (!"pom".equals(project.getPackaging()) || applyProjectElementRemovalsToPomPackaging) {
+            return false;
+        }
+        return getRawPomElementHandling("parent") == ElementHandling.remove
+                && getRawPomElementHandling("build") == ElementHandling.remove;
     }
 
     /**
@@ -1162,6 +1214,7 @@ public class GroomMojo extends AbstractGroomMojo {
             if ("maven-plugin".equals(this.project.getPackaging())) {
                 descriptor.setPrerequisites(ElementHandling.expand);
             }
+            applyProjectExpressionResolution(descriptor, false);
         } else {
             if (descriptor.isEmpty()) {
                 // legacy approach...
@@ -1170,14 +1223,36 @@ public class GroomMojo extends AbstractGroomMojo {
                 descriptor = new GroomDescriptor(rawDescriptor);
             }
 
+            applyProjectExpressionResolution(descriptor, true);
             if (this.groomMode != null) {
                 descriptor = descriptor.merge(this.groomMode.getDescriptor());
             }
         }
         descriptor.setDefaultOperation(defaultOperation);
+        if (buildPlugins != null) {
+            descriptor.setBuildPlugins(buildPlugins);
+        }
         effectiveCompileScopeRemoval = descriptor.isCompileScopeRemoved();
         effectiveBuildPluginsRemoval = descriptor.isBuildPluginsRemoved();
         return descriptor;
+    }
+
+    /**
+     * Applies project expression resolution to public metadata fields.
+     *
+     * @param descriptor   the descriptor to update
+     * @param keepExisting whether existing handling values should be preserved
+     */
+    private void applyProjectExpressionResolution(GroomDescriptor descriptor, boolean keepExisting) {
+        if (!resolveProjectExpressions) {
+            return;
+        }
+        Map<String, ElementHandling> handlers = descriptor.getName2handlingMap();
+        for (PomProperty<?> property : PROJECT_EXPRESSION_PROPERTIES) {
+            if (!keepExisting || !handlers.containsKey(property.getName())) {
+                descriptor.setHandling(property, ElementHandling.expand);
+            }
+        }
     }
 
     /**
@@ -1758,7 +1833,7 @@ public class GroomMojo extends AbstractGroomMojo {
     /**
      * Tests whether Maven should use the generated groomed POM for later lifecycle goals.
      *
-     * @return <code>true</code> if the generated flattened POM shall be {@link MavenProject#setFile(java.io.File) set}
+     * @return <code>true</code> if the generated groomed POM shall be {@link MavenProject#setFile(java.io.File) set}
      * as POM artifact of the {@link MavenProject}, <code>false</code> otherwise.
      */
     public boolean isUpdatePomFile() {
