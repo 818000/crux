@@ -30,7 +30,7 @@ By default, the plugin writes `.groomed-pom.xml` under the project base director
 | `groom:groom` | Generates the groomed publication POM. |
 | `groom:normalize` | Alias of `groom:groom` for publication normalization workflows. |
 | `groom:clean` | Deletes the generated groomed POM. Bound to Maven's `clean` phase. |
-| `groom:native-image` | Consolidates multi-module GraalVM native-image metadata and rewrites main and sources jar metadata. |
+| `groom:native-image` | Consolidates multi-module GraalVM native-image metadata and rewrites main and sources jar metadata. Supports legacy GraalVM 21 `*-config.json` files and GraalVM 25 `reachability-metadata.json` files. |
 
 ### Direct Usage
 

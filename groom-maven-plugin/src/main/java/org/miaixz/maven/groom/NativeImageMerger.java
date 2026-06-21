@@ -77,9 +77,29 @@ final class NativeImageMerger {
     private static final String SERIALIZATION_CONFIG = "serialization-config.json";
 
     /**
+     * The GraalVM 25 unified reachability metadata file name.
+     */
+    private static final String REACHABILITY_METADATA_CONFIG = "reachability-metadata.json";
+
+    /**
+     * The GraalVM 25 reachability metadata serialization section name.
+     */
+    private static final String REACHABILITY_SERIALIZATION_SECTION = "serialization";
+
+    /**
      * Ordered top-level sections used by GraalVM serialization configuration metadata.
      */
     private static final List<String> SERIALIZATION_SECTIONS = List.of("types", "lambdaCapturingTypes", "proxies");
+
+    /**
+     * Ordered top-level array sections used by GraalVM 25 reachability metadata.
+     */
+    private static final List<String> REACHABILITY_ARRAY_SECTIONS = List.of("reflection", "resources");
+
+    /**
+     * Ordered foreign function metadata sections used by GraalVM 25 reachability metadata.
+     */
+    private static final List<String> FOREIGN_SECTIONS = List.of("downcalls", "upcalls", "directUpcalls");
 
     /**
      * Matcher used to read the native-image default-for selector from module metadata.
@@ -141,13 +161,23 @@ final class NativeImageMerger {
      */
     void execute(String targetVersion) throws IOException {
         Set<String> allVersions = discoverAvailableVersions();
+        boolean includeUnversionedMetadata = targetVersion != null && hasUnversionedConfigurationFiles();
+        if (includeUnversionedMetadata && !allVersions.contains(targetVersion)) {
+            allVersions = new LinkedHashSet<>(allVersions);
+            allVersions.add(targetVersion);
+        }
         log.info("Discovered versions: " + String.join(", ", allVersions));
 
         Set<String> versionsToProcess = determineVersionsToProcess(allVersions, targetVersion);
 
+        boolean includeVersionedDependencyMetadata = targetVersion != null;
+
         for (String version : versionsToProcess) {
             log.info("=== Processing version " + version + " ===");
-            processVersion(version);
+            processVersion(
+                    version,
+                    includeUnversionedMetadata && Objects.equals(version, targetVersion),
+                    includeVersionedDependencyMetadata && Objects.equals(version, targetVersion));
         }
 
         generateTopIndex(versionsToProcess, targetVersion);
@@ -162,6 +192,11 @@ final class NativeImageMerger {
     private Set<String> discoverAvailableVersions() throws IOException {
         Set<String> versions = new LinkedHashSet<>();
         Path projectRoot = projectRootDirectory;
+
+        try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
+            paths.filter(Files::isRegularFile).filter(this::isNativeImageConfigurationFile)
+                    .map(this::metadataVersion).flatMap(Optional::stream).forEach(versions::add);
+        }
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isDirectory).filter(path -> path.toString().contains("native-image")).forEach(path -> {
@@ -179,19 +214,24 @@ final class NativeImageMerger {
      * Processes a specific version by consolidating all configuration files for that version.
      *
      * @param version the version to process
+     * @param includeUnversionedMetadata whether direct native-image metadata should be processed as this version
      * @throws IOException if file operations fail
      */
-    private void processVersion(String version) throws IOException {
+    private void processVersion(
+            String version, boolean includeUnversionedMetadata, boolean includeVersionedDependencyMetadata)
+            throws IOException {
         Path outputPath = outputBaseDirectory.resolve(version);
         Files.createDirectories(outputPath);
 
         log.info("Consolidating native-image configurations for version " + version + "...");
 
-        Set<String> configurationTypes = discoverConfigurationFileTypes(version);
+        Set<String> configurationTypes =
+                discoverConfigurationFileTypes(version, includeUnversionedMetadata, includeVersionedDependencyMetadata);
         log.info("Discovered configuration types: " + String.join(", ", configurationTypes));
 
         for (String configType : configurationTypes) {
-            List<Path> configFiles = locateConfigurationFiles(version, configType);
+            List<Path> configFiles = locateConfigurationFiles(
+                    version, configType, includeUnversionedMetadata, includeVersionedDependencyMetadata);
 
             if (configFiles.isEmpty()) {
                 log.info("No " + configType + " files discovered");
@@ -214,16 +254,21 @@ final class NativeImageMerger {
      * Discovers all configuration file types for a specific version.
      *
      * @param version the version to scan for configuration files
+     * @param includeUnversionedMetadata whether direct native-image metadata should be included
      * @return a sorted set of configuration file names (alphabetical order)
      * @throws IOException if file system access fails
      */
-    private Set<String> discoverConfigurationFileTypes(String version) throws IOException {
+    private Set<String> discoverConfigurationFileTypes(
+            String version, boolean includeUnversionedMetadata, boolean includeVersionedDependencyMetadata)
+            throws IOException {
         Set<String> configTypes = new LinkedHashSet<>();
         Path projectRoot = projectRootDirectory;
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
-                    .filter(path -> path.toString().contains(version)).filter(path -> !shouldExcludeModule(path))
+                    .filter(path -> matchesMetadataVersion(
+                            path, version, includeUnversionedMetadata, includeVersionedDependencyMetadata))
+                    .filter(path -> !shouldExcludeModule(path))
                     .filter(path -> path.getFileName().toString().endsWith(".json"))
                     .filter(path -> !path.getFileName().toString().equals("index.json"))
                     .forEach(path -> configTypes.add(path.getFileName().toString()));
@@ -237,21 +282,96 @@ final class NativeImageMerger {
      *
      * @param version        the version to search for
      * @param configFileName the configuration file name to locate
+     * @param includeUnversionedMetadata whether direct native-image metadata should be included
      * @return a list of paths to the discovered configuration files
      * @throws IOException if file system access fails
      */
-    private List<Path> locateConfigurationFiles(String version, String configFileName) throws IOException {
+    private List<Path> locateConfigurationFiles(
+            String version,
+            String configFileName,
+            boolean includeUnversionedMetadata,
+            boolean includeVersionedDependencyMetadata)
+            throws IOException {
         List<Path> files = new ArrayList<>();
         Path projectRoot = projectRootDirectory;
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
-                    .filter(path -> path.toString().contains(version))
+                    .filter(path -> matchesMetadataVersion(
+                            path, version, includeUnversionedMetadata, includeVersionedDependencyMetadata))
                     .filter(path -> path.getFileName().toString().equals(configFileName))
                     .filter(path -> !shouldExcludeModule(path)).forEach(files::add);
         }
 
         return files;
+    }
+
+    /**
+     * Tests whether direct native-image metadata files exist without a metadata version directory.
+     *
+     * @return true when unversioned native-image configuration files are present
+     * @throws IOException if file system access fails
+     */
+    private boolean hasUnversionedConfigurationFiles() throws IOException {
+        try (java.util.stream.Stream<Path> paths = Files.walk(projectRootDirectory)) {
+            return paths.filter(Files::isRegularFile).anyMatch(path -> isNativeImageConfigurationFile(path)
+                    && metadataVersion(path).isEmpty());
+        }
+    }
+
+    /**
+     * Tests whether a path is a native-image JSON configuration file.
+     *
+     * @param path the path to evaluate
+     * @return true when the path is a native-image JSON configuration file
+     */
+    private boolean isNativeImageConfigurationFile(Path path) {
+        return path.toString().contains("native-image")
+                && path.getFileName().toString().endsWith(".json")
+                && !path.getFileName().toString().equals("index.json")
+                && !shouldExcludeModule(path);
+    }
+
+    /**
+     * Tests whether a native-image file belongs to the requested metadata version.
+     *
+     * @param path the path to evaluate
+     * @param version the metadata version being processed
+     * @param includeUnversionedMetadata whether direct native-image metadata should be included
+     * @return true when the path should be included for the requested version
+     */
+    private boolean matchesMetadataVersion(
+            Path path, String version, boolean includeUnversionedMetadata, boolean includeVersionedDependencyMetadata) {
+        Optional<String> pathVersion = metadataVersion(path);
+        if (pathVersion.isPresent()) {
+            String normalizedPath = path.toAbsolutePath().normalize().toString().replace('\\', '/');
+            if (includeVersionedDependencyMetadata && !normalizedPath.contains("/native-image/org.miaixz/")) {
+                return true;
+            }
+            return pathVersion.get().equals(version);
+        }
+        return path.toString().contains(version)
+                || includeUnversionedMetadata && isNativeImageConfigurationFile(path);
+    }
+
+    /**
+     * Extracts the metadata version segment from a native-image path.
+     *
+     * @param path the native-image configuration path
+     * @return the metadata version segment, or empty when the file is placed directly under the module metadata path
+     */
+    private Optional<String> metadataVersion(Path path) {
+        Path normalized = path.toAbsolutePath().normalize();
+        for (int i = 0; i < normalized.getNameCount(); i++) {
+            if (!"native-image".equals(normalized.getName(i).toString())) {
+                continue;
+            }
+            int versionIndex = i + 3;
+            if (versionIndex < normalized.getNameCount() - 1) {
+                return Optional.of(normalized.getName(versionIndex).toString());
+            }
+        }
+        return Optional.empty();
     }
 
     /**
@@ -278,7 +398,9 @@ final class NativeImageMerger {
      * @return consolidated configuration content as a string
      */
     private String consolidateConfigurationFiles(List<Path> files, String configType) {
-        if (configType.contains("resource-config")) {
+        if (REACHABILITY_METADATA_CONFIG.equals(configType)) {
+            return consolidateReachabilityMetadataConfigurations(files);
+        } else if (configType.contains("resource-config")) {
             return consolidateResourceConfigurations(files);
         } else if (SERIALIZATION_CONFIG.equals(configType)) {
             return consolidateSerializationConfigurations(files);
@@ -286,6 +408,235 @@ final class NativeImageMerger {
             // Default to array merging for most JSON configuration files
             return consolidateJsonArrayConfigurations(files);
         }
+    }
+
+    /**
+     * Consolidates GraalVM 25 unified reachability metadata files.
+     * <p>
+     * Unlike the legacy {@code *-config.json} files, {@code reachability-metadata.json} is a single object whose
+     * top-level fields contain arrays of metadata entries. Treating the whole file as an array entry produces invalid
+     * nested metadata, so it needs a dedicated merge path.
+     * </p>
+     *
+     * @param files list of reachability-metadata.json files to consolidate
+     * @return consolidated reachability metadata content
+     */
+    private String consolidateReachabilityMetadataConfigurations(List<Path> files) {
+        ReachabilityMetadata metadata = new ReachabilityMetadata();
+
+        for (Path file : files) {
+            try {
+                String content = Files.readString(file).trim();
+                if (content.isEmpty()) {
+                    continue;
+                }
+                mergeReachabilityArraySections(content, metadata);
+                mergeSerializationReachabilitySection(content, metadata);
+                mergeJniReachabilitySection(content, metadata);
+                mergeForeignReachabilitySection(content, metadata);
+            } catch (IOException e) {
+                log.warn("Warning: Could not process " + file + ": " + e.getMessage());
+            }
+        }
+
+        return formatReachabilityMetadata(metadata);
+    }
+
+    /**
+     * Merges direct top-level array sections from a reachability metadata object.
+     *
+     * @param content  reachability metadata content
+     * @param metadata target metadata accumulator
+     */
+    private void mergeReachabilityArraySections(String content, ReachabilityMetadata metadata) {
+        for (String section : REACHABILITY_ARRAY_SECTIONS) {
+            String arrayContent = extractNamedArrayContent(content, section);
+            if (arrayContent == null || arrayContent.isEmpty()) {
+                continue;
+            }
+            for (String object : extractJsonObjects(arrayContent)) {
+                metadata.add(section, normalizeReachabilityMetadataObject(object));
+            }
+        }
+    }
+
+    /**
+     * Merges legacy top-level serialization entries into GraalVM 25 reflection metadata.
+     *
+     * @param content  reachability metadata content
+     * @param metadata target metadata accumulator
+     */
+    private void mergeSerializationReachabilitySection(String content, ReachabilityMetadata metadata) {
+        String arrayContent = extractNamedArrayContent(content, REACHABILITY_SERIALIZATION_SECTION);
+        if (arrayContent == null || arrayContent.isEmpty()) {
+            return;
+        }
+        for (String object : extractJsonObjects(arrayContent)) {
+            metadata.add("reflection", normalizeSerializationReachabilityMetadataObject(object));
+        }
+    }
+
+    /**
+     * Merges the accepted {@code jni} section into {@code reflection} entries marked as JNI-accessible.
+     *
+     * @param content  reachability metadata content
+     * @param metadata target metadata accumulator
+     */
+    private void mergeJniReachabilitySection(String content, ReachabilityMetadata metadata) {
+        String arrayContent = extractNamedArrayContent(content, "jni");
+        if (arrayContent == null || arrayContent.isEmpty()) {
+            return;
+        }
+        for (String object : extractJsonObjects(arrayContent)) {
+            metadata.add("reflection", normalizeJniReachabilityMetadataObject(object));
+        }
+    }
+
+    /**
+     * Merges the nested {@code foreign} reachability metadata object.
+     *
+     * @param content  reachability metadata content
+     * @param metadata target metadata accumulator
+     */
+    private void mergeForeignReachabilitySection(String content, ReachabilityMetadata metadata) {
+        String foreignContent = extractNamedObjectContent(content, "foreign");
+        if (foreignContent == null || foreignContent.isEmpty()) {
+            return;
+        }
+        for (String section : FOREIGN_SECTIONS) {
+            String arrayContent = extractNamedArrayContent(foreignContent, section);
+            if (arrayContent == null || arrayContent.isEmpty()) {
+                continue;
+            }
+            for (String object : extractJsonObjects(arrayContent)) {
+                metadata.addForeign(section, normalizeReachabilityMetadataObject(object));
+            }
+        }
+    }
+
+    /**
+     * Normalizes a reachability metadata object for GraalVM 25.
+     *
+     * @param object the metadata object
+     * @return normalized metadata object
+     */
+    private String normalizeReachabilityMetadataObject(String object) {
+        return object.strip()
+                .replace("\"typeReachable\"", "\"typeReached\"")
+                .replace("\"jniAccessibleType\"", "\"jniAccessible\"");
+    }
+
+    /**
+     * Normalizes a JNI metadata object and marks it as accessible through JNI.
+     *
+     * @param object the JNI metadata object
+     * @return reflection metadata object with {@code jniAccessible}
+     */
+    private String normalizeJniReachabilityMetadataObject(String object) {
+        String normalized = normalizeReachabilityMetadataObject(object);
+        if (normalized.contains("\"jniAccessible\"")) {
+            return normalized;
+        }
+        return appendBooleanProperty(normalized, "jniAccessible");
+    }
+
+    /**
+     * Normalizes a serialization metadata object and marks it as serializable through reflection metadata.
+     *
+     * @param object the serialization metadata object
+     * @return reflection metadata object with {@code serializable}
+     */
+    private String normalizeSerializationReachabilityMetadataObject(String object) {
+        String normalized = normalizeReachabilityMetadataObject(object);
+        if (!normalized.contains("\"type\"") && normalized.contains("\"name\"")) {
+            normalized = normalized.replaceFirst("\"name\"\\s*:", "\"type\":");
+        }
+        if (normalized.contains("\"serializable\"")) {
+            return normalized;
+        }
+        return appendBooleanProperty(normalized, "serializable");
+    }
+
+    /**
+     * Appends a boolean property to a JSON object.
+     *
+     * @param object the JSON object
+     * @param propertyName the property name
+     * @return the JSON object with the boolean property appended
+     */
+    private String appendBooleanProperty(String object, String propertyName) {
+        int insertPosition = object.lastIndexOf('}');
+        if (insertPosition == -1) {
+            return object;
+        }
+        String prefix = object.substring(0, insertPosition).stripTrailing();
+        String suffix = object.substring(insertPosition);
+        String separator = prefix.endsWith("{") ? "\n" : ",\n";
+        return prefix + separator + "  \"" + propertyName + "\": true\n" + suffix;
+    }
+
+    /**
+     * Formats consolidated GraalVM 25 reachability metadata.
+     *
+     * @param metadata consolidated reachability metadata
+     * @return formatted reachability-metadata.json content
+     */
+    private String formatReachabilityMetadata(ReachabilityMetadata metadata) {
+        List<String> sections = new ArrayList<>();
+        for (String section : REACHABILITY_ARRAY_SECTIONS) {
+            List<String> entries = metadata.entries(section);
+            if (!entries.isEmpty()) {
+                sections.add(formatNamedJsonArray(section, entries, 2));
+            }
+        }
+        if (metadata.hasForeignEntries()) {
+            sections.add(formatForeignMetadata(metadata));
+        }
+
+        if (sections.isEmpty()) {
+            return "{}";
+        }
+        return "{\n" + String.join(",\n", sections) + "\n}";
+    }
+
+    /**
+     * Formats a named JSON array section.
+     *
+     * @param name    the section name
+     * @param entries the JSON object entries
+     * @param indent  the indentation width of the section name
+     * @return formatted JSON array section
+     */
+    private String formatNamedJsonArray(String name, List<String> entries, int indent) {
+        String sectionIndent = " ".repeat(indent);
+        StringBuilder builder = new StringBuilder();
+        builder.append(sectionIndent).append("\"").append(name).append("\": [\n");
+        for (int i = 0; i < entries.size(); i++) {
+            builder.append(indentJsonObject(entries.get(i), indent + 2));
+            if (i < entries.size() - 1) {
+                builder.append(",");
+            }
+            builder.append("\n");
+        }
+        builder.append(sectionIndent).append("]");
+        return builder.toString();
+    }
+
+    /**
+     * Formats nested foreign function metadata.
+     *
+     * @param metadata consolidated reachability metadata
+     * @return formatted foreign metadata section
+     */
+    private String formatForeignMetadata(ReachabilityMetadata metadata) {
+        List<String> sections = new ArrayList<>();
+        for (String section : FOREIGN_SECTIONS) {
+            List<String> entries = metadata.foreignEntries(section);
+            if (!entries.isEmpty()) {
+                sections.add(formatNamedJsonArray(section, entries, 4));
+            }
+        }
+        return "  \"foreign\": {\n" + String.join(",\n", sections) + "\n  }";
     }
 
     /**
@@ -383,6 +734,29 @@ final class NativeImageMerger {
             return null;
         }
         return content.substring(arrayStart + 1, arrayEnd).trim();
+    }
+
+    /**
+     * Extracts the content of a named JSON object property.
+     *
+     * @param content    the JSON object content
+     * @param objectName the object property name
+     * @return the inner object content, or {@code null} when the property is absent or malformed
+     */
+    private String extractNamedObjectContent(String content, String objectName) {
+        int nameStart = content.indexOf("\"" + objectName + "\"");
+        if (nameStart == -1) {
+            return null;
+        }
+        int objectStart = content.indexOf("{", nameStart);
+        if (objectStart == -1) {
+            return null;
+        }
+        int objectEnd = findMatchingBrace(content, objectStart);
+        if (objectEnd == -1) {
+            return null;
+        }
+        return content.substring(objectStart + 1, objectEnd).trim();
     }
 
     /**
@@ -783,6 +1157,51 @@ final class NativeImageMerger {
     }
 
     /**
+     * Finds the matching closing brace for an opening brace.
+     *
+     * @param content the content to search
+     * @param openPos position of an opening brace
+     * @return position of the matching closing brace, or -1 if not found
+     */
+    private int findMatchingBrace(String content, int openPos) {
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+
+        for (int i = openPos; i < content.length(); i++) {
+            char c = content.charAt(i);
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+
+            if (!inString) {
+                if (c == '{') {
+                    depth++;
+                } else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        return i;
+                    }
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /**
      * Extracts bundle objects from configuration file content.
      *
      * @param content    the configuration file content
@@ -1028,20 +1447,21 @@ final class NativeImageMerger {
      */
     private void generateTopIndex(Set<String> processedVersions, String targetVersion) throws IOException {
         Set<String> allTestedVersions = collectAllTestedVersions(processedVersions);
+        Set<String> allowedPackages = collectAllowedPackages();
+        Optional<String> defaultForPattern = collectDefaultForPattern();
 
         // metadata-version should be the latest actually processed version directory
         String latestVersion = processedVersions.stream().max(Comparator.naturalOrder()).orElse("unknown");
-
-        String defaultForPattern = collectDefaultForPattern(latestVersion, targetVersion);
 
         StringBuilder metadataBuilder = new StringBuilder();
         metadataBuilder.append("[\n");
         metadataBuilder.append("  {\n");
         metadataBuilder.append("    \"latest\": true,\n");
         metadataBuilder.append("    \"override\": true,\n");
-        metadataBuilder.append("    \"module\": \"").append(moduleIdentifier).append("\",\n");
-        metadataBuilder.append("    \"default-for\": \"").append(defaultForPattern).append("\",\n");
         metadataBuilder.append("    \"metadata-version\": \"").append(latestVersion).append("\",\n");
+        if (defaultForPattern.isPresent()) {
+            metadataBuilder.append("    \"default-for\": \"").append(defaultForPattern.get()).append("\",\n");
+        }
         metadataBuilder.append("    \"tested-versions\": [\n");
 
         List<String> sortedVersions = allTestedVersions.stream().sorted(Comparator.naturalOrder()).toList();
@@ -1049,6 +1469,18 @@ final class NativeImageMerger {
         for (int i = 0; i < sortedVersions.size(); i++) {
             metadataBuilder.append("      \"").append(sortedVersions.get(i)).append("\"");
             if (i < sortedVersions.size() - 1) {
+                metadataBuilder.append(",");
+            }
+            metadataBuilder.append("\n");
+        }
+
+        metadataBuilder.append("    ],\n");
+        metadataBuilder.append("    \"allowed-packages\": [\n");
+
+        List<String> sortedPackages = allowedPackages.stream().sorted().toList();
+        for (int i = 0; i < sortedPackages.size(); i++) {
+            metadataBuilder.append("      \"").append(sortedPackages.get(i)).append("\"");
+            if (i < sortedPackages.size() - 1) {
                 metadataBuilder.append(",");
             }
             metadataBuilder.append("\n");
@@ -1064,25 +1496,34 @@ final class NativeImageMerger {
 
         log.info("\nLatest version: " + latestVersion);
         log.info("All tested versions: " + String.join(", ", sortedVersions));
+        log.info("Allowed packages: " + String.join(", ", sortedPackages));
+        defaultForPattern.ifPresent(pattern -> log.info("Default-for: " + pattern));
     }
 
     /**
      * Collects the native-image default-for selector from module source metadata.
      *
-     * @param latestVersion the latest processed metadata version used as fallback input
-     * @param targetVersion the target project version requested by the build
-     * @return the discovered selector, or a version-derived selector when no metadata selector exists
+     * @return the discovered selector, or empty when source metadata does not define one
      */
-    private String collectDefaultForPattern(String latestVersion, String targetVersion) {
+    private Optional<String> collectDefaultForPattern() {
+        Set<String> patterns = new LinkedHashSet<>();
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRootDirectory)) {
-            return paths.filter(Files::isRegularFile).filter(this::isSourceNativeImageIndex)
+            paths.filter(Files::isRegularFile).filter(this::isSourceNativeImageIndex)
                     .filter(path -> !shouldExcludeModule(path)).map(this::extractDefaultForPattern)
-                    .filter(Objects::nonNull).sorted().findFirst()
-                    .orElse(generateDefaultForPattern(latestVersion, targetVersion));
+                    .filter(Objects::nonNull).forEach(patterns::add);
         } catch (IOException e) {
             log.warn("Warning: Could not scan for default-for metadata: " + e.getMessage());
-            return generateDefaultForPattern(latestVersion, targetVersion);
         }
+        if (patterns.isEmpty()) {
+            return Optional.empty();
+        }
+        if (patterns.size() == 1) {
+            return Optional.of(patterns.iterator().next());
+        }
+        List<String> sortedPatterns = patterns.stream().sorted().toList();
+        log.warn("Warning: Multiple default-for selectors found; merging them with regex alternation: "
+                + String.join(", ", sortedPatterns));
+        return Optional.of(sortedPatterns.stream().map(pattern -> "(?:" + pattern + ")").collect(Collectors.joining("|")));
     }
 
     /**
@@ -1117,81 +1558,6 @@ final class NativeImageMerger {
     }
 
     /**
-     * Generates a default-for selector from a processed metadata version and the project version.
-     *
-     * @param latestVersion the latest processed metadata version
-     * @param targetVersion the target project version requested by the build
-     * @return the version-derived default-for selector
-     */
-    private String generateDefaultForPattern(String latestVersion, String targetVersion) {
-        int[] metadataVersion = majorMinor(latestVersion);
-        int[] projectVersion = majorMinor(targetVersion);
-
-        if (metadataVersion != null && projectVersion != null && metadataVersion[0] == projectVersion[0]) {
-            String minorPattern = minorRangeFrom(metadataVersion[1]);
-            if (minorPattern.matches("\\d+")) {
-                return metadataVersion[0] + "\\\\." + minorPattern + "\\\\.[0-9]{1,2}";
-            }
-            return metadataVersion[0] + "\\\\.(" + minorPattern + ")\\\\.[0-9]{1,2}";
-        }
-
-        if (metadataVersion != null) {
-            return metadataVersion[0] + "\\\\." + metadataVersion[1] + "\\\\.[0-9]+";
-        }
-        return latestVersion.replace(".", "\\\\.") + "\\\\.[0-9]+";
-    }
-
-    /**
-     * Extracts the major and minor numbers from a semantic version string.
-     *
-     * @param version the version string to parse
-     * @return a two-element array containing major and minor numbers, or null when parsing fails
-     */
-    private int[] majorMinor(String version) {
-        if (version == null) {
-            return null;
-        }
-        String[] parts = version.split("\\.");
-        if (parts.length < 2) {
-            return null;
-        }
-        try {
-            return new int[] { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) };
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    /**
-     * Builds a minor-version alternation from the metadata minor version to the two-digit minor-version ceiling.
-     *
-     * @param startMinor the first supported minor version
-     * @return a regular expression alternation such as {@code [5-9]|[1-9][0-9]}
-     */
-    private String minorRangeFrom(int startMinor) {
-        if (startMinor <= 0) {
-            return "[0-9]|[1-9][0-9]";
-        }
-        if (startMinor < 9) {
-            return "[" + startMinor + "-9]|[1-9][0-9]";
-        }
-        if (startMinor == 9) {
-            return "9|[1-9][0-9]";
-        }
-        if (startMinor < 99) {
-            int tens = startMinor / 10;
-            int ones = startMinor % 10;
-            StringBuilder pattern = new StringBuilder();
-            pattern.append(tens).append("[").append(ones).append("-9]");
-            if (tens < 9) {
-                pattern.append("|[").append(tens + 1).append("-9][0-9]");
-            }
-            return pattern.toString();
-        }
-        return "99";
-    }
-
-    /**
      * Collects all tested versions from module index files.
      *
      * @param processedVersions set of versions that were processed
@@ -1222,6 +1588,34 @@ final class NativeImageMerger {
     }
 
     /**
+     * Collects allowed packages from module index files.
+     *
+     * @return allowed packages for the generated metadata index
+     */
+    private Set<String> collectAllowedPackages() {
+        Set<String> allowedPackages = new LinkedHashSet<>();
+
+        try (java.util.stream.Stream<Path> paths = Files.walk(projectRootDirectory)) {
+            paths.filter(Files::isRegularFile).filter(this::isSourceNativeImageIndex)
+                    .filter(path -> !shouldExcludeModule(path)).forEach(path -> {
+                        try {
+                            String content = Files.readString(path);
+                            extractAllowedPackages(content, allowedPackages);
+                        } catch (IOException e) {
+                            log.warn("Warning: Could not read " + path + ": " + e.getMessage());
+                        }
+                    });
+        } catch (IOException e) {
+            log.warn("Warning: Could not scan for allowed-packages metadata: " + e.getMessage());
+        }
+
+        if (allowedPackages.isEmpty()) {
+            allowedPackages.add(moduleIdentifier.split(":", 2)[0]);
+        }
+        return allowedPackages;
+    }
+
+    /**
      * Extracts version numbers from tested-versions array in JSON content.
      *
      * @param content           the JSON content containing tested-versions
@@ -1238,6 +1632,27 @@ final class NativeImageMerger {
 
             while (versionMatcher.find()) {
                 allTestedVersions.add(versionMatcher.group(1));
+            }
+        }
+    }
+
+    /**
+     * Extracts package names from allowed-packages array in JSON content.
+     *
+     * @param content         the JSON content containing allowed-packages
+     * @param allowedPackages set to add extracted packages to
+     */
+    private void extractAllowedPackages(String content, Set<String> allowedPackages) {
+        Pattern pattern = Pattern.compile("\"allowed-packages\"\\s*:\\s*\\[([^\\]]+)\\]");
+        Matcher matcher = pattern.matcher(content);
+
+        if (matcher.find()) {
+            String packagesString = matcher.group(1);
+            Pattern packagePattern = Pattern.compile("\"([^\"]+)\"");
+            Matcher packageMatcher = packagePattern.matcher(packagesString);
+
+            while (packageMatcher.find()) {
+                allowedPackages.add(packageMatcher.group(1));
             }
         }
     }
@@ -1265,6 +1680,8 @@ final class NativeImageMerger {
                     statistics.append(countJsonArrayEntries(content)).append(" reflection entries, ");
                 } else if (configType.contains("resource-config")) {
                     statistics.append(countResourcePatterns(content)).append(" resource patterns, ");
+                } else if (REACHABILITY_METADATA_CONFIG.equals(configType)) {
+                    statistics.append(countReachabilityMetadataEntries(content)).append(" reachability metadata entries, ");
                 } else {
                     statistics.append(configType).append(" consolidated, ");
                 }
@@ -1307,6 +1724,139 @@ final class NativeImageMerger {
 
         String arrayContent = jsonContent.substring(arrayStart, arrayEnd + 1);
         return (int) arrayContent.chars().filter(ch -> ch == '"').count() / 2;
+    }
+
+    /**
+     * Counts entries in GraalVM 25 reachability metadata.
+     *
+     * @param jsonContent reachability metadata content
+     * @return number of metadata entries
+     */
+    private int countReachabilityMetadataEntries(String jsonContent) {
+        int count = 0;
+        for (String section : REACHABILITY_ARRAY_SECTIONS) {
+            String arrayContent = extractNamedArrayContent(jsonContent, section);
+            if (arrayContent != null) {
+                count += extractJsonObjects(arrayContent).size();
+            }
+        }
+        String foreignContent = extractNamedObjectContent(jsonContent, "foreign");
+        if (foreignContent != null) {
+            for (String section : FOREIGN_SECTIONS) {
+                String arrayContent = extractNamedArrayContent(foreignContent, section);
+                if (arrayContent != null) {
+                    count += extractJsonObjects(arrayContent).size();
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Accumulates reachability metadata entries while preserving insertion order and avoiding duplicates.
+     */
+    private final class ReachabilityMetadata {
+
+        /**
+         * Top-level reachability metadata array entries.
+         */
+        private final Map<String, List<String>> entries = new LinkedHashMap<>();
+
+        /**
+         * De-duplication keys for top-level reachability metadata entries.
+         */
+        private final Map<String, Set<String>> keys = new LinkedHashMap<>();
+
+        /**
+         * Nested foreign metadata entries.
+         */
+        private final Map<String, List<String>> foreignEntries = new LinkedHashMap<>();
+
+        /**
+         * De-duplication keys for nested foreign metadata entries.
+         */
+        private final Map<String, Set<String>> foreignKeys = new LinkedHashMap<>();
+
+        /**
+         * Constructs a reachability metadata accumulator.
+         */
+        private ReachabilityMetadata() {
+            for (String section : REACHABILITY_ARRAY_SECTIONS) {
+                entries.put(section, new ArrayList<>());
+                keys.put(section, new LinkedHashSet<>());
+            }
+            for (String section : FOREIGN_SECTIONS) {
+                foreignEntries.put(section, new ArrayList<>());
+                foreignKeys.put(section, new LinkedHashSet<>());
+            }
+        }
+
+        /**
+         * Adds a top-level entry if it has not been seen.
+         *
+         * @param section the section name
+         * @param object  the JSON object entry
+         */
+        private void add(String section, String object) {
+            addEntry(entries.get(section), keys.get(section), object);
+        }
+
+        /**
+         * Adds a foreign metadata entry if it has not been seen.
+         *
+         * @param section the foreign section name
+         * @param object  the JSON object entry
+         */
+        private void addForeign(String section, String object) {
+            addEntry(foreignEntries.get(section), foreignKeys.get(section), object);
+        }
+
+        /**
+         * Returns top-level entries for a section.
+         *
+         * @param section the section name
+         * @return section entries
+         */
+        private List<String> entries(String section) {
+            return entries.get(section);
+        }
+
+        /**
+         * Returns foreign entries for a section.
+         *
+         * @param section the foreign section name
+         * @return foreign section entries
+         */
+        private List<String> foreignEntries(String section) {
+            return foreignEntries.get(section);
+        }
+
+        /**
+         * Tests whether any foreign metadata entries have been accumulated.
+         *
+         * @return true if the foreign object should be written
+         */
+        private boolean hasForeignEntries() {
+            return foreignEntries.values().stream().anyMatch(list -> !list.isEmpty());
+        }
+
+        /**
+         * Adds an entry to the supplied collection when unique.
+         *
+         * @param target target entry list
+         * @param seen   de-duplication keys
+         * @param object JSON object entry
+         */
+        private void addEntry(List<String> target, Set<String> seen, String object) {
+            String trimmed = object == null ? "" : object.trim();
+            if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+                return;
+            }
+            String key = generateUniqueObjectKey(trimmed);
+            if (seen.add(key)) {
+                target.add(trimmed);
+            }
+        }
     }
 
 }

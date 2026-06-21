@@ -30,7 +30,7 @@ Crux 是 Miaixz 项目使用的 Maven 插件合集，用于沉淀可复用的构
 | `groom:groom` | 生成规范化后的发布 POM。 |
 | `groom:normalize` | `groom:groom` 的别名，用于发布 POM 规范化流程。 |
 | `groom:clean` | 删除生成的发布 POM，绑定 Maven `clean` 阶段。 |
-| `groom:native-image` | 合并多模块 GraalVM native-image 元数据，并重写主包和源码包中的 native-image 配置。 |
+| `groom:native-image` | 合并多模块 GraalVM native-image 元数据，并重写主包和源码包中的 native-image 配置；支持 GraalVM 21 旧式 `*-config.json` 文件和 GraalVM 25 `reachability-metadata.json` 文件。 |
 
 ### 直接执行
 
