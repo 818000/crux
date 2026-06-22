@@ -24,7 +24,7 @@
 
     <groupId>org.miaixz.maven</groupId>
     <artifactId>groom-maven-plugin</artifactId>
-    <version>2.1.5</version>
+    <version>2.1.6</version>
     <packaging>maven-plugin</packaging>
 
     <name>groom-maven-plugin</name>
@@ -77,7 +77,8 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <maven.compiler.release>25</maven.compiler.release>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
         <maven.api.version>3.9.11</maven.api.version>
         <maven.central.version>0.10.0</maven.central.version>
         <maven.compiler.version>3.15.0</maven.compiler.version>
@@ -221,7 +222,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
-                    <release>${maven.compiler.release}</release>
+                    <release>${maven.compiler.target}</release>
                 </configuration>
             </plugin>
             <plugin>

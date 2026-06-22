@@ -161,11 +161,6 @@ final class NativeImageMerger {
      */
     void execute(String targetVersion) throws IOException {
         Set<String> allVersions = discoverAvailableVersions();
-        boolean includeUnversionedMetadata = targetVersion != null && hasUnversionedConfigurationFiles();
-        if (includeUnversionedMetadata && !allVersions.contains(targetVersion)) {
-            allVersions = new LinkedHashSet<>(allVersions);
-            allVersions.add(targetVersion);
-        }
         log.info("Discovered versions: " + String.join(", ", allVersions));
 
         Set<String> versionsToProcess = determineVersionsToProcess(allVersions, targetVersion);
@@ -174,10 +169,7 @@ final class NativeImageMerger {
 
         for (String version : versionsToProcess) {
             log.info("=== Processing version " + version + " ===");
-            processVersion(
-                    version,
-                    includeUnversionedMetadata && Objects.equals(version, targetVersion),
-                    includeVersionedDependencyMetadata && Objects.equals(version, targetVersion));
+            processVersion(version, includeVersionedDependencyMetadata && Objects.equals(version, targetVersion));
         }
 
         generateTopIndex(versionsToProcess, targetVersion);
@@ -214,24 +206,19 @@ final class NativeImageMerger {
      * Processes a specific version by consolidating all configuration files for that version.
      *
      * @param version the version to process
-     * @param includeUnversionedMetadata whether direct native-image metadata should be processed as this version
      * @throws IOException if file operations fail
      */
-    private void processVersion(
-            String version, boolean includeUnversionedMetadata, boolean includeVersionedDependencyMetadata)
-            throws IOException {
+    private void processVersion(String version, boolean includeVersionedDependencyMetadata) throws IOException {
         Path outputPath = outputBaseDirectory.resolve(version);
         Files.createDirectories(outputPath);
 
         log.info("Consolidating native-image configurations for version " + version + "...");
 
-        Set<String> configurationTypes =
-                discoverConfigurationFileTypes(version, includeUnversionedMetadata, includeVersionedDependencyMetadata);
+        Set<String> configurationTypes = discoverConfigurationFileTypes(version, includeVersionedDependencyMetadata);
         log.info("Discovered configuration types: " + String.join(", ", configurationTypes));
 
         for (String configType : configurationTypes) {
-            List<Path> configFiles = locateConfigurationFiles(
-                    version, configType, includeUnversionedMetadata, includeVersionedDependencyMetadata);
+            List<Path> configFiles = locateConfigurationFiles(version, configType, includeVersionedDependencyMetadata);
 
             if (configFiles.isEmpty()) {
                 log.info("No " + configType + " files discovered");
@@ -244,8 +231,6 @@ final class NativeImageMerger {
             log.info("Consolidated " + configFiles.size() + " " + configType + " files");
         }
 
-        generateVersionIndex(outputPath.resolve("index.json"), configurationTypes);
-
         // Generate consolidation statistics
         displayConsolidationStatistics(version, outputPath, configurationTypes);
     }
@@ -254,20 +239,17 @@ final class NativeImageMerger {
      * Discovers all configuration file types for a specific version.
      *
      * @param version the version to scan for configuration files
-     * @param includeUnversionedMetadata whether direct native-image metadata should be included
      * @return a sorted set of configuration file names (alphabetical order)
      * @throws IOException if file system access fails
      */
-    private Set<String> discoverConfigurationFileTypes(
-            String version, boolean includeUnversionedMetadata, boolean includeVersionedDependencyMetadata)
+    private Set<String> discoverConfigurationFileTypes(String version, boolean includeVersionedDependencyMetadata)
             throws IOException {
         Set<String> configTypes = new LinkedHashSet<>();
         Path projectRoot = projectRootDirectory;
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
-                    .filter(path -> matchesMetadataVersion(
-                            path, version, includeUnversionedMetadata, includeVersionedDependencyMetadata))
+                    .filter(path -> matchesMetadataVersion(path, version, includeVersionedDependencyMetadata))
                     .filter(path -> !shouldExcludeModule(path))
                     .filter(path -> path.getFileName().toString().endsWith(".json"))
                     .filter(path -> !path.getFileName().toString().equals("index.json"))
@@ -282,41 +264,23 @@ final class NativeImageMerger {
      *
      * @param version        the version to search for
      * @param configFileName the configuration file name to locate
-     * @param includeUnversionedMetadata whether direct native-image metadata should be included
      * @return a list of paths to the discovered configuration files
      * @throws IOException if file system access fails
      */
     private List<Path> locateConfigurationFiles(
-            String version,
-            String configFileName,
-            boolean includeUnversionedMetadata,
-            boolean includeVersionedDependencyMetadata)
+            String version, String configFileName, boolean includeVersionedDependencyMetadata)
             throws IOException {
         List<Path> files = new ArrayList<>();
         Path projectRoot = projectRootDirectory;
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
-                    .filter(path -> matchesMetadataVersion(
-                            path, version, includeUnversionedMetadata, includeVersionedDependencyMetadata))
+                    .filter(path -> matchesMetadataVersion(path, version, includeVersionedDependencyMetadata))
                     .filter(path -> path.getFileName().toString().equals(configFileName))
                     .filter(path -> !shouldExcludeModule(path)).forEach(files::add);
         }
 
         return files;
-    }
-
-    /**
-     * Tests whether direct native-image metadata files exist without a metadata version directory.
-     *
-     * @return true when unversioned native-image configuration files are present
-     * @throws IOException if file system access fails
-     */
-    private boolean hasUnversionedConfigurationFiles() throws IOException {
-        try (java.util.stream.Stream<Path> paths = Files.walk(projectRootDirectory)) {
-            return paths.filter(Files::isRegularFile).anyMatch(path -> isNativeImageConfigurationFile(path)
-                    && metadataVersion(path).isEmpty());
-        }
     }
 
     /**
@@ -337,11 +301,9 @@ final class NativeImageMerger {
      *
      * @param path the path to evaluate
      * @param version the metadata version being processed
-     * @param includeUnversionedMetadata whether direct native-image metadata should be included
      * @return true when the path should be included for the requested version
      */
-    private boolean matchesMetadataVersion(
-            Path path, String version, boolean includeUnversionedMetadata, boolean includeVersionedDependencyMetadata) {
+    private boolean matchesMetadataVersion(Path path, String version, boolean includeVersionedDependencyMetadata) {
         Optional<String> pathVersion = metadataVersion(path);
         if (pathVersion.isPresent()) {
             String normalizedPath = path.toAbsolutePath().normalize().toString().replace('\\', '/');
@@ -350,8 +312,7 @@ final class NativeImageMerger {
             }
             return pathVersion.get().equals(version);
         }
-        return path.toString().contains(version)
-                || includeUnversionedMetadata && isNativeImageConfigurationFile(path);
+        return false;
     }
 
     /**
@@ -1411,31 +1372,6 @@ final class NativeImageMerger {
         }
 
         return path;
-    }
-
-    /**
-     * Generates a version index file listing all configuration file types.
-     *
-     * @param outputPath         the path where the index file should be written
-     * @param configurationTypes set of configuration file types
-     * @throws IOException if file writing fails
-     */
-    private void generateVersionIndex(Path outputPath, Set<String> configurationTypes) throws IOException {
-        StringBuilder indexBuilder = new StringBuilder();
-        indexBuilder.append("[\n");
-
-        List<String> sortedTypes = configurationTypes.stream().sorted().toList();
-
-        for (int i = 0; i < sortedTypes.size(); i++) {
-            indexBuilder.append("  \"").append(sortedTypes.get(i)).append("\"");
-            if (i < sortedTypes.size() - 1) {
-                indexBuilder.append(",");
-            }
-            indexBuilder.append("\n");
-        }
-        indexBuilder.append("]");
-
-        Files.writeString(outputPath, indexBuilder.toString());
     }
 
     /**
