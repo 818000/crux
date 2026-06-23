@@ -152,7 +152,7 @@ public class NativeImageMojo extends AbstractGroomMojo {
             merger.execute(nativeImageVersion);
 
             NativeImageJarRewriter rewriter = new NativeImageJarRewriter(
-                    project.getArtifactId(), project.getVersion(), vendor);
+                    project.getGroupId(), project.getArtifactId(), project.getVersion(), vendor);
             if (rewriteJar) {
                 rewriter.rewrite(absolute(jarFile), nativeImageDirectory);
             }

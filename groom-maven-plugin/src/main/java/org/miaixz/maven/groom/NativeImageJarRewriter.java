@@ -61,6 +61,11 @@ final class NativeImageJarRewriter {
     private final String artifactId;
 
     /**
+     * Project group identifier used to replace only consolidated project metadata.
+     */
+    private final String groupId;
+
+    /**
      * Project version written to manifest attributes.
      */
     private final String version;
@@ -73,11 +78,13 @@ final class NativeImageJarRewriter {
     /**
      * Constructs a new jar rewriter.
      *
+     * @param groupId the project group identifier
      * @param artifactId the project artifact identifier
      * @param version the project version
      * @param vendor the project vendor
      */
-    NativeImageJarRewriter(String artifactId, String version, String vendor) {
+    NativeImageJarRewriter(String groupId, String artifactId, String version, String vendor) {
+        this.groupId = groupId;
         this.artifactId = artifactId;
         this.version = version;
         this.vendor = vendor;
@@ -184,7 +191,24 @@ final class NativeImageJarRewriter {
     private boolean shouldSkipOriginalEntry(String entryName) {
         return MANIFEST_ENTRY.equalsIgnoreCase(entryName)
                 || entryName.startsWith(MAVEN_METADATA_PREFIX)
-                || entryName.startsWith(NATIVE_IMAGE_PREFIX);
+                || shouldSkipOriginalNativeImageEntry(entryName);
+    }
+
+    /**
+     * Tests whether an original native-image entry should be replaced by the consolidated metadata.
+     * <p>
+     * Third-party metadata must remain in shaded jars because it belongs to the original dependency coordinates. Only
+     * the current project group metadata is consolidated and replaced.
+     * </p>
+     *
+     * @param entryName the jar entry name
+     * @return {@code true} when the native-image entry should be replaced
+     */
+    private boolean shouldSkipOriginalNativeImageEntry(String entryName) {
+        if (!entryName.startsWith(NATIVE_IMAGE_PREFIX)) {
+            return false;
+        }
+        return entryName.startsWith(NATIVE_IMAGE_PREFIX + groupId + "/");
     }
 
     /**

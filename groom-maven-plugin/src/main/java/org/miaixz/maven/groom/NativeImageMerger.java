@@ -20,6 +20,7 @@
 package org.miaixz.maven.groom;
 
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -80,6 +81,11 @@ final class NativeImageMerger {
      * The GraalVM 25 unified reachability metadata file name.
      */
     private static final String REACHABILITY_METADATA_CONFIG = "reachability-metadata.json";
+
+    /**
+     * The native-image build arguments configuration file name.
+     */
+    private static final String NATIVE_IMAGE_PROPERTIES_CONFIG = "native-image.properties";
 
     /**
      * The GraalVM 25 reachability metadata serialization section name.
@@ -251,8 +257,7 @@ final class NativeImageMerger {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
                     .filter(path -> matchesMetadataVersion(path, version, includeVersionedDependencyMetadata))
                     .filter(path -> !shouldExcludeModule(path))
-                    .filter(path -> path.getFileName().toString().endsWith(".json"))
-                    .filter(path -> !path.getFileName().toString().equals("index.json"))
+                    .filter(this::isSupportedNativeImageConfigurationFile)
                     .forEach(path -> configTypes.add(path.getFileName().toString()));
         }
 
@@ -291,9 +296,20 @@ final class NativeImageMerger {
      */
     private boolean isNativeImageConfigurationFile(Path path) {
         return path.toString().contains("native-image")
-                && path.getFileName().toString().endsWith(".json")
-                && !path.getFileName().toString().equals("index.json")
+                && isSupportedNativeImageConfigurationFile(path)
                 && !shouldExcludeModule(path);
+    }
+
+    /**
+     * Tests whether a file name is supported for native-image consolidation.
+     *
+     * @param path the path to evaluate
+     * @return true when the file should be consolidated
+     */
+    private boolean isSupportedNativeImageConfigurationFile(Path path) {
+        String fileName = path.getFileName().toString();
+        return (fileName.endsWith(".json") && !"index.json".equals(fileName))
+                || NATIVE_IMAGE_PROPERTIES_CONFIG.equals(fileName);
     }
 
     /**
@@ -359,7 +375,9 @@ final class NativeImageMerger {
      * @return consolidated configuration content as a string
      */
     private String consolidateConfigurationFiles(List<Path> files, String configType) {
-        if (REACHABILITY_METADATA_CONFIG.equals(configType)) {
+        if (NATIVE_IMAGE_PROPERTIES_CONFIG.equals(configType)) {
+            return consolidateNativeImagePropertiesConfigurations(files);
+        } else if (REACHABILITY_METADATA_CONFIG.equals(configType)) {
             return consolidateReachabilityMetadataConfigurations(files);
         } else if (configType.contains("resource-config")) {
             return consolidateResourceConfigurations(files);
@@ -369,6 +387,49 @@ final class NativeImageMerger {
             // Default to array merging for most JSON configuration files
             return consolidateJsonArrayConfigurations(files);
         }
+    }
+
+    /**
+     * Consolidates native-image.properties files by merging and de-duplicating Args entries.
+     *
+     * @param files list of native-image.properties files to consolidate
+     * @return consolidated native-image.properties content
+     */
+    private String consolidateNativeImagePropertiesConfigurations(List<Path> files) {
+        Set<String> args = new LinkedHashSet<>();
+
+        for (Path file : files) {
+            try {
+                Properties properties = new Properties();
+                properties.load(new StringReader(Files.readString(file)));
+                String value = properties.getProperty("Args");
+                if (value == null || value.isBlank()) {
+                    continue;
+                }
+                for (String arg : value.strip().split("\\s+")) {
+                    if (!arg.isBlank()) {
+                        args.add(arg);
+                    }
+                }
+            } catch (IOException e) {
+                log.warn("Warning: Could not process " + file + ": " + e.getMessage());
+            }
+        }
+
+        if (args.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder builder = new StringBuilder("Args = ");
+        int index = 0;
+        for (String arg : args) {
+            if (index > 0) {
+                builder.append(" \\\n  ");
+            }
+            builder.append(arg);
+            index++;
+        }
+        return builder.toString();
     }
 
     /**
