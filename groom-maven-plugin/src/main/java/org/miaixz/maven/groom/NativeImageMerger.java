@@ -128,6 +128,11 @@ final class NativeImageMerger {
     private final String moduleIdentifier;
 
     /**
+     * Project group identifier used to select module-owned native-image metadata.
+     */
+    private final String groupId;
+
+    /**
      * Module directory names excluded from the consolidation scan.
      */
     private final Set<String> excludedModules;
@@ -155,6 +160,7 @@ final class NativeImageMerger {
         this.projectRootDirectory = projectRootDirectory;
         this.outputBaseDirectory = outputBaseDirectory;
         this.moduleIdentifier = moduleIdentifier;
+        this.groupId = moduleIdentifier.split(":", 2)[0];
         this.excludedModules = new LinkedHashSet<>(excludedModules);
         this.log = log;
     }
@@ -171,11 +177,11 @@ final class NativeImageMerger {
 
         Set<String> versionsToProcess = determineVersionsToProcess(allVersions, targetVersion);
 
-        boolean includeVersionedDependencyMetadata = targetVersion != null;
+        boolean includeUnversionedTargetMetadata = targetVersion != null;
 
         for (String version : versionsToProcess) {
             log.info("=== Processing version " + version + " ===");
-            processVersion(version, includeVersionedDependencyMetadata && Objects.equals(version, targetVersion));
+            processVersion(version, includeUnversionedTargetMetadata && Objects.equals(version, targetVersion));
         }
 
         generateTopIndex(versionsToProcess, targetVersion);
@@ -196,35 +202,27 @@ final class NativeImageMerger {
                     .map(this::metadataVersion).flatMap(Optional::stream).forEach(versions::add);
         }
 
-        try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
-            paths.filter(Files::isDirectory).filter(path -> path.toString().contains("native-image")).forEach(path -> {
-                String name = path.getFileName().toString();
-                if (name.matches("^\\d+(\\.\\d+)*$")) {
-                    versions.add(name);
-                }
-            });
-        }
-
-        return versions.stream().sorted(Comparator.reverseOrder()).collect(Collectors.toCollection(LinkedHashSet::new));
+        return versions.stream().sorted(this::compareVersionsDescending).collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     /**
      * Processes a specific version by consolidating all configuration files for that version.
      *
      * @param version the version to process
+     * @param includeUnversionedTargetMetadata whether direct project metadata should be processed as this version
      * @throws IOException if file operations fail
      */
-    private void processVersion(String version, boolean includeVersionedDependencyMetadata) throws IOException {
+    private void processVersion(String version, boolean includeUnversionedTargetMetadata) throws IOException {
         Path outputPath = outputBaseDirectory.resolve(version);
         Files.createDirectories(outputPath);
 
         log.info("Consolidating native-image configurations for version " + version + "...");
 
-        Set<String> configurationTypes = discoverConfigurationFileTypes(version, includeVersionedDependencyMetadata);
+        Set<String> configurationTypes = discoverConfigurationFileTypes(version, includeUnversionedTargetMetadata);
         log.info("Discovered configuration types: " + String.join(", ", configurationTypes));
 
         for (String configType : configurationTypes) {
-            List<Path> configFiles = locateConfigurationFiles(version, configType, includeVersionedDependencyMetadata);
+            List<Path> configFiles = locateConfigurationFiles(version, configType, includeUnversionedTargetMetadata);
 
             if (configFiles.isEmpty()) {
                 log.info("No " + configType + " files discovered");
@@ -245,17 +243,18 @@ final class NativeImageMerger {
      * Discovers all configuration file types for a specific version.
      *
      * @param version the version to scan for configuration files
+     * @param includeUnversionedTargetMetadata whether direct project metadata should be included
      * @return a sorted set of configuration file names (alphabetical order)
      * @throws IOException if file system access fails
      */
-    private Set<String> discoverConfigurationFileTypes(String version, boolean includeVersionedDependencyMetadata)
+    private Set<String> discoverConfigurationFileTypes(String version, boolean includeUnversionedTargetMetadata)
             throws IOException {
         Set<String> configTypes = new LinkedHashSet<>();
         Path projectRoot = projectRootDirectory;
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
-                    .filter(path -> matchesMetadataVersion(path, version, includeVersionedDependencyMetadata))
+                    .filter(path -> matchesMetadataVersion(path, version, includeUnversionedTargetMetadata))
                     .filter(path -> !shouldExcludeModule(path))
                     .filter(this::isSupportedNativeImageConfigurationFile)
                     .forEach(path -> configTypes.add(path.getFileName().toString()));
@@ -267,20 +266,21 @@ final class NativeImageMerger {
     /**
      * Locates all configuration files of a specific type for a given version.
      *
-     * @param version        the version to search for
+     * @param version the version to search for
      * @param configFileName the configuration file name to locate
+     * @param includeUnversionedTargetMetadata whether direct project metadata should be included
      * @return a list of paths to the discovered configuration files
      * @throws IOException if file system access fails
      */
     private List<Path> locateConfigurationFiles(
-            String version, String configFileName, boolean includeVersionedDependencyMetadata)
+            String version, String configFileName, boolean includeUnversionedTargetMetadata)
             throws IOException {
         List<Path> files = new ArrayList<>();
         Path projectRoot = projectRootDirectory;
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
             paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
-                    .filter(path -> matchesMetadataVersion(path, version, includeVersionedDependencyMetadata))
+                    .filter(path -> matchesMetadataVersion(path, version, includeUnversionedTargetMetadata))
                     .filter(path -> path.getFileName().toString().equals(configFileName))
                     .filter(path -> !shouldExcludeModule(path)).forEach(files::add);
         }
@@ -296,6 +296,7 @@ final class NativeImageMerger {
      */
     private boolean isNativeImageConfigurationFile(Path path) {
         return path.toString().contains("native-image")
+                && isProjectGroupNativeImagePath(path)
                 && isSupportedNativeImageConfigurationFile(path)
                 && !shouldExcludeModule(path);
     }
@@ -317,16 +318,35 @@ final class NativeImageMerger {
      *
      * @param path the path to evaluate
      * @param version the metadata version being processed
+     * @param includeUnversionedTargetMetadata whether direct project metadata should be included
      * @return true when the path should be included for the requested version
      */
-    private boolean matchesMetadataVersion(Path path, String version, boolean includeVersionedDependencyMetadata) {
+    private boolean matchesMetadataVersion(Path path, String version, boolean includeUnversionedTargetMetadata) {
+        if (!isProjectGroupNativeImagePath(path)) {
+            return false;
+        }
         Optional<String> pathVersion = metadataVersion(path);
         if (pathVersion.isPresent()) {
-            String normalizedPath = path.toAbsolutePath().normalize().toString().replace('\\', '/');
-            if (includeVersionedDependencyMetadata && !normalizedPath.contains("/native-image/org.miaixz/")) {
-                return true;
-            }
             return pathVersion.get().equals(version);
+        }
+        return includeUnversionedTargetMetadata && isNativeImageConfigurationFile(path);
+    }
+
+    /**
+     * Tests whether a native-image path belongs to this project group.
+     *
+     * @param path the path to evaluate
+     * @return true when the path is under {@code META-INF/native-image/<groupId>/...}
+     */
+    private boolean isProjectGroupNativeImagePath(Path path) {
+        Path normalized = path.toAbsolutePath().normalize();
+        for (int i = 0; i < normalized.getNameCount(); i++) {
+            if (!"native-image".equals(normalized.getName(i).toString())) {
+                continue;
+            }
+            int groupIndex = i + 1;
+            return groupIndex < normalized.getNameCount()
+                    && groupId.equals(normalized.getName(groupIndex).toString());
         }
         return false;
     }
@@ -1051,14 +1071,127 @@ final class NativeImageMerger {
      * @return set of versions to process
      */
     private Set<String> determineVersionsToProcess(Set<String> allVersions, String targetVersion) {
-        if (allVersions.contains(targetVersion)) {
-            return Set.of(targetVersion);
-        } else if (targetVersion != null) {
-            log.info("Warning: Version " + targetVersion + " not found, processing all available versions");
-            return allVersions;
-        } else {
+        if (targetVersion == null) {
             return allVersions;
         }
+        if (allVersions.contains(targetVersion)) {
+            return Set.of(targetVersion);
+        }
+        Optional<String> compatibleVersion = compatibleMetadataVersion(allVersions, targetVersion);
+        if (compatibleVersion.isPresent()) {
+            log.info("Version " + targetVersion + " not found, using compatible metadata version "
+                    + compatibleVersion.get());
+            return Set.of(compatibleVersion.get());
+        }
+        Optional<String> latestVersion = allVersions.stream().max(this::compareVersions);
+        if (latestVersion.isPresent()) {
+            log.info("Warning: Version " + targetVersion + " not found, using latest metadata version "
+                    + latestVersion.get());
+            return Set.of(latestVersion.get());
+        }
+        return Set.of();
+    }
+
+    /**
+     * Finds the latest metadata version sharing the target major and minor version.
+     *
+     * @param allVersions all discovered metadata versions
+     * @param targetVersion the requested project version
+     * @return compatible metadata version, or empty when none matches
+     */
+    private Optional<String> compatibleMetadataVersion(Set<String> allVersions, String targetVersion) {
+        int[] targetMajorMinor = majorMinor(targetVersion);
+        if (targetMajorMinor == null) {
+            return Optional.empty();
+        }
+        return allVersions.stream()
+                .filter(version -> hasSameMajorMinor(version, targetMajorMinor))
+                .max(this::compareVersions);
+    }
+
+    /**
+     * Tests whether a version shares the supplied major and minor components.
+     *
+     * @param version the version to inspect
+     * @param targetMajorMinor the target major and minor components
+     * @return true when the version is compatible
+     */
+    private boolean hasSameMajorMinor(String version, int[] targetMajorMinor) {
+        int[] candidateMajorMinor = majorMinor(version);
+        return candidateMajorMinor != null
+                && candidateMajorMinor[0] == targetMajorMinor[0]
+                && candidateMajorMinor[1] == targetMajorMinor[1];
+    }
+
+    /**
+     * Extracts the major and minor numbers from a semantic version string.
+     *
+     * @param version the version string to parse
+     * @return a two-element array containing major and minor numbers, or null when parsing fails
+     */
+    private int[] majorMinor(String version) {
+        if (version == null) {
+            return null;
+        }
+        String[] parts = version.split("\\.");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            return new int[] { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) };
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Compares version strings numerically where possible.
+     *
+     * @param left the left version
+     * @param right the right version
+     * @return negative, zero, or positive according to ascending version order
+     */
+    private int compareVersions(String left, String right) {
+        String[] leftParts = left.split("\\.");
+        String[] rightParts = right.split("\\.");
+        int length = Math.max(leftParts.length, rightParts.length);
+        for (int i = 0; i < length; i++) {
+            int leftValue = numericVersionPart(leftParts, i);
+            int rightValue = numericVersionPart(rightParts, i);
+            if (leftValue != rightValue) {
+                return Integer.compare(leftValue, rightValue);
+            }
+        }
+        return left.compareTo(right);
+    }
+
+    /**
+     * Compares version strings in descending order.
+     *
+     * @param left the left version
+     * @param right the right version
+     * @return negative, zero, or positive according to descending version order
+     */
+    private int compareVersionsDescending(String left, String right) {
+        return compareVersions(right, left);
+    }
+
+    /**
+     * Reads a numeric version segment.
+     *
+     * @param parts version segments
+     * @param index segment index
+     * @return numeric segment value, or zero for missing/non-numeric suffixes
+     */
+    private int numericVersionPart(String[] parts, int index) {
+        if (index >= parts.length) {
+            return 0;
+        }
+        Matcher matcher = Pattern.compile("^\\d+").matcher(parts[index]);
+        if (!matcher.find()) {
+            return 0;
+        }
+        return Integer.parseInt(matcher.group());
     }
 
     /**
@@ -1491,7 +1624,7 @@ final class NativeImageMerger {
         Files.createDirectories(metadataPath.getParent());
         Files.writeString(metadataPath, metadataBuilder.toString());
 
-        log.info("\nLatest version: " + latestVersion);
+        log.info("Latest version: " + latestVersion);
         log.info("All tested versions: " + String.join(", ", sortedVersions));
         log.info("Allowed packages: " + String.join(", ", sortedPackages));
         defaultForPattern.ifPresent(pattern -> log.info("Default-for: " + pattern));
@@ -1506,6 +1639,7 @@ final class NativeImageMerger {
         Set<String> patterns = new LinkedHashSet<>();
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRootDirectory)) {
             paths.filter(Files::isRegularFile).filter(this::isSourceNativeImageIndex)
+                    .filter(this::isProjectGroupNativeImagePath)
                     .filter(path -> !shouldExcludeModule(path)).map(this::extractDefaultForPattern)
                     .filter(Objects::nonNull).forEach(patterns::add);
         } catch (IOException e) {
@@ -1568,6 +1702,7 @@ final class NativeImageMerger {
             try (java.util.stream.Stream<Path> paths = Files.walk(projectRoot)) {
                 paths.filter(Files::isRegularFile).filter(path -> path.toString().contains("native-image"))
                         .filter(path -> path.getFileName().toString().equals("index.json"))
+                        .filter(this::isProjectGroupNativeImagePath)
                         .filter(path -> !shouldExcludeModule(path)).forEach(path -> {
                             try {
                                 String content = Files.readString(path);
@@ -1594,6 +1729,7 @@ final class NativeImageMerger {
 
         try (java.util.stream.Stream<Path> paths = Files.walk(projectRootDirectory)) {
             paths.filter(Files::isRegularFile).filter(this::isSourceNativeImageIndex)
+                    .filter(this::isProjectGroupNativeImagePath)
                     .filter(path -> !shouldExcludeModule(path)).forEach(path -> {
                         try {
                             String content = Files.readString(path);
