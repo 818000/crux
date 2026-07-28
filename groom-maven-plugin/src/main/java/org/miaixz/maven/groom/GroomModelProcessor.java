@@ -146,17 +146,18 @@ public class GroomModelProcessor extends DefaultModelProcessor {
         if (model == null || !hasManagedPlaceholder(model)) {
             return model;
         }
-        String version = resolveVersion(baseDirectory);
-        model.setVersion(replace(model.getVersion(), version));
+        String projectVersion = resolveProjectVersion(baseDirectory);
+        String groomVersion = resolveGroomVersion();
+        model.setVersion(replace(model.getVersion(), projectVersion, groomVersion));
         Parent parent = model.getParent();
         if (parent != null) {
-            parent.setVersion(replace(parent.getVersion(), version));
+            parent.setVersion(replace(parent.getVersion(), projectVersion, groomVersion));
         }
-        replaceModelBase(model, version);
-        replaceBuild(model.getBuild(), version);
+        replaceModelBase(model, projectVersion, groomVersion);
+        replaceBuild(model.getBuild(), projectVersion, groomVersion);
         for (Profile profile : model.getProfiles()) {
-            replaceModelBase(profile, version);
-            replaceBuild(profile.getBuild(), version);
+            replaceModelBase(profile, projectVersion, groomVersion);
+            replaceBuild(profile.getBuild(), projectVersion, groomVersion);
         }
         return model;
     }
@@ -168,9 +169,23 @@ public class GroomModelProcessor extends DefaultModelProcessor {
      * @return the resolved repository version.
      * @throws IOException when the version cannot be read.
      */
-    private static String resolveVersion(File baseDirectory) throws IOException {
+    private static String resolveProjectVersion(File baseDirectory) throws IOException {
         try {
-            return GroomVersion.read(findRoot(baseDirectory));
+            return GroomVersion.readProjectVersion(findRoot(baseDirectory));
+        } catch (MojoExecutionException e) {
+            throw new IOException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Resolves the version of the Groom extension currently loaded by Maven.
+     *
+     * @return the loaded Groom extension version.
+     * @throws IOException when the embedded Maven metadata cannot be read.
+     */
+    private static String resolveGroomVersion() throws IOException {
+        try {
+            return GroomVersion.resolveGroomVersion();
         } catch (MojoExecutionException e) {
             throw new IOException(e.getMessage(), e);
         }
@@ -349,40 +364,43 @@ public class GroomModelProcessor extends DefaultModelProcessor {
     /**
      * Replaces managed placeholders in model base properties, dependencies and reporting sections.
      *
-     * @param model   the model base to update.
-     * @param version the resolved repository version.
+     * @param model          the model base to update.
+     * @param projectVersion the resolved repository version.
+     * @param groomVersion   the loaded Groom extension version.
      */
-    private static void replaceModelBase(ModelBase model, String version) {
-        model.getProperties().replaceAll((name, value) -> value == null ? null : replace(value.toString(), version));
-        model.getProperties().setProperty(GroomVersion.REVISION_PROPERTY, version);
-        model.getProperties().setProperty(GroomVersion.BUS_VERSION_PROPERTY, version);
-        model.getProperties().setProperty(GroomVersion.GROOM_VERSION_PROPERTY, version);
-        replaceDependencies(model.getDependencies(), version);
+    private static void replaceModelBase(ModelBase model, String projectVersion, String groomVersion) {
+        model.getProperties().replaceAll(
+                (name, value) -> value == null ? null : replace(value.toString(), projectVersion, groomVersion));
+        model.getProperties().setProperty(GroomVersion.REVISION_PROPERTY, projectVersion);
+        model.getProperties().setProperty(GroomVersion.BUS_VERSION_PROPERTY, projectVersion);
+        model.getProperties().setProperty(GroomVersion.GROOM_VERSION_PROPERTY, groomVersion);
+        replaceDependencies(model.getDependencies(), projectVersion, groomVersion);
         DependencyManagement management = model.getDependencyManagement();
         if (management != null) {
-            replaceDependencies(management.getDependencies(), version);
+            replaceDependencies(management.getDependencies(), projectVersion, groomVersion);
         }
-        replaceReporting(model.getReporting(), version);
+        replaceReporting(model.getReporting(), projectVersion, groomVersion);
     }
 
     /**
      * Replaces managed placeholders in build plugins, plugin management and extensions.
      *
-     * @param build   the build section to update.
-     * @param version the resolved repository version.
+     * @param build          the build section to update.
+     * @param projectVersion the resolved repository version.
+     * @param groomVersion   the loaded Groom extension version.
      */
-    private static void replaceBuild(BuildBase build, String version) {
+    private static void replaceBuild(BuildBase build, String projectVersion, String groomVersion) {
         if (build == null) {
             return;
         }
-        replacePlugins(build.getPlugins(), version);
+        replacePlugins(build.getPlugins(), projectVersion, groomVersion);
         PluginManagement management = build.getPluginManagement();
         if (management != null) {
-            replacePlugins(management.getPlugins(), version);
+            replacePlugins(management.getPlugins(), projectVersion, groomVersion);
         }
         if (build instanceof Build concreteBuild) {
             for (Extension extension : concreteBuild.getExtensions()) {
-                extension.setVersion(replace(extension.getVersion(), version));
+                extension.setVersion(replace(extension.getVersion(), projectVersion, groomVersion));
             }
         }
     }
@@ -390,52 +408,57 @@ public class GroomModelProcessor extends DefaultModelProcessor {
     /**
      * Replaces managed placeholders in dependency versions.
      *
-     * @param dependencies the dependencies to update.
-     * @param version      the resolved repository version.
+     * @param dependencies   the dependencies to update.
+     * @param projectVersion the resolved repository version.
+     * @param groomVersion   the loaded Groom extension version.
      */
-    private static void replaceDependencies(Iterable<Dependency> dependencies, String version) {
+    private static void replaceDependencies(
+            Iterable<Dependency> dependencies, String projectVersion, String groomVersion) {
         for (Dependency dependency : dependencies) {
-            dependency.setVersion(replace(dependency.getVersion(), version));
+            dependency.setVersion(replace(dependency.getVersion(), projectVersion, groomVersion));
         }
     }
 
     /**
      * Replaces managed placeholders in plugin versions and plugin dependencies.
      *
-     * @param plugins the plugins to update.
-     * @param version the resolved repository version.
+     * @param plugins        the plugins to update.
+     * @param projectVersion the resolved repository version.
+     * @param groomVersion   the loaded Groom extension version.
      */
-    private static void replacePlugins(Iterable<Plugin> plugins, String version) {
+    private static void replacePlugins(Iterable<Plugin> plugins, String projectVersion, String groomVersion) {
         for (Plugin plugin : plugins) {
-            plugin.setVersion(replace(plugin.getVersion(), version));
-            replaceDependencies(plugin.getDependencies(), version);
+            plugin.setVersion(replace(plugin.getVersion(), projectVersion, groomVersion));
+            replaceDependencies(plugin.getDependencies(), projectVersion, groomVersion);
         }
     }
 
     /**
      * Replaces managed placeholders in reporting plugin versions.
      *
-     * @param reporting the reporting section to update.
-     * @param version   the resolved repository version.
+     * @param reporting      the reporting section to update.
+     * @param projectVersion the resolved repository version.
+     * @param groomVersion   the loaded Groom extension version.
      */
-    private static void replaceReporting(Reporting reporting, String version) {
+    private static void replaceReporting(Reporting reporting, String projectVersion, String groomVersion) {
         if (reporting == null) {
             return;
         }
         for (ReportPlugin plugin : reporting.getPlugins()) {
-            plugin.setVersion(replace(plugin.getVersion(), version));
+            plugin.setVersion(replace(plugin.getVersion(), projectVersion, groomVersion));
         }
     }
 
     /**
      * Replaces managed version placeholders in a single string value.
      *
-     * @param value   the value to update.
-     * @param version the resolved repository version.
+     * @param value          the value to update.
+     * @param projectVersion the resolved repository version.
+     * @param groomVersion   the loaded Groom extension version.
      * @return the updated value.
      */
-    private static String replace(String value, String version) {
-        return GroomVersion.replacePlaceholders(value, version);
+    private static String replace(String value, String projectVersion, String groomVersion) {
+        return GroomVersion.replacePlaceholders(value, projectVersion, groomVersion);
     }
 
 }

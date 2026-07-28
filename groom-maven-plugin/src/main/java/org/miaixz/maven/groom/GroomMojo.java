@@ -590,8 +590,12 @@ public class GroomMojo extends AbstractGroomMojo {
      * @throws MojoExecutionException if anything goes wrong.
      */
     protected void writeStringToFile(String data, Path file, String encoding) throws MojoExecutionException {
+        if (GroomVersion.hasGroomVersionPlaceholder(data)) {
+            data = GroomVersion.replaceGroomVersionPlaceholder(data, GroomVersion.resolveGroomVersion());
+        }
         if (resolveProjectVersion) {
-            data = GroomVersion.replacePlaceholders(data, GroomVersion.resolve(this.session, this.project));
+            data = GroomVersion.replaceProjectVersionPlaceholders(
+                    data, GroomVersion.resolveProjectVersion(this.session, this.project));
         }
         if (shouldRemoveCompileScope()) {
             data = COMPILE_SCOPE_PATTERN.matcher(data).replaceAll("");

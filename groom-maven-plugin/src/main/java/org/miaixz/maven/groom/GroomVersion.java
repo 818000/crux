@@ -21,6 +21,7 @@ package org.miaixz.maven.groom;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Objects;
@@ -32,7 +33,7 @@ import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.project.MavenProject;
 
 /**
- * Reads and validates the Bus build version from the repository {@code VERSION} file.
+ * Resolves and validates repository and Groom extension versions.
  */
 public final class GroomVersion {
 
@@ -47,7 +48,7 @@ public final class GroomVersion {
     public static final String BUS_VERSION_PROPERTY = "bus.version";
 
     /**
-     * Maven property used by the Groom plugin and generated metadata.
+     * Maven property containing the version of the loaded Groom extension.
      */
     public static final String GROOM_VERSION_PROPERTY = "groom.version";
 
@@ -74,9 +75,9 @@ public final class GroomVersion {
      * @return the resolved version
      * @throws MojoExecutionException when the version cannot be resolved
      */
-    public static String resolve(MavenSession session) throws MojoExecutionException {
+    public static String resolveProjectVersion(MavenSession session) throws MojoExecutionException {
         File root = findRoot(session);
-        return read(root);
+        return readProjectVersion(root);
     }
 
     /**
@@ -87,15 +88,16 @@ public final class GroomVersion {
      * @return the resolved version
      * @throws MojoExecutionException when the version cannot be resolved
      */
-    public static String resolve(MavenSession session, MavenProject project) throws MojoExecutionException {
-        String version = property(session, REVISION_PROPERTY);
-        if (version != null) {
-            return validate(version, REVISION_PROPERTY);
+    public static String resolveProjectVersion(MavenSession session, MavenProject project)
+            throws MojoExecutionException {
+        String projectVersion = property(session, REVISION_PROPERTY);
+        if (projectVersion != null) {
+            return validate(projectVersion, REVISION_PROPERTY);
         }
         if (project != null && project.getVersion() != null && !project.getVersion().isBlank()) {
             return validate(project.getVersion(), "project.version");
         }
-        return resolve(session);
+        return resolveProjectVersion(session);
     }
 
     /**
@@ -105,7 +107,7 @@ public final class GroomVersion {
      * @return the validated version
      * @throws MojoExecutionException when the version file is missing or invalid
      */
-    public static String read(File root) throws MojoExecutionException {
+    public static String readProjectVersion(File root) throws MojoExecutionException {
         Objects.requireNonNull(root, "root");
         File versionFile = new File(root, VERSION_FILE);
         if (!versionFile.isFile()) {
@@ -147,33 +149,76 @@ public final class GroomVersion {
     }
 
     /**
-     * Injects the resolved version into Maven properties.
+     * Injects the resolved project and Groom extension versions into Maven properties.
      *
-     * @param properties the Maven properties
-     * @param version    the version to inject
-     * @throws MojoExecutionException when an existing value conflicts with {@code VERSION}
+     * @param properties     the Maven properties
+     * @param projectVersion the repository project version
+     * @throws MojoExecutionException when an existing value conflicts with a managed version
      */
-    public static void inject(Properties properties, String version) throws MojoExecutionException {
-        put(properties, REVISION_PROPERTY, version);
-        put(properties, BUS_VERSION_PROPERTY, version);
-        put(properties, GROOM_VERSION_PROPERTY, version);
+    public static void inject(Properties properties, String projectVersion) throws MojoExecutionException {
+        put(properties, REVISION_PROPERTY, projectVersion, VERSION_FILE);
+        put(properties, BUS_VERSION_PROPERTY, projectVersion, VERSION_FILE);
+        put(properties, GROOM_VERSION_PROPERTY, resolveGroomVersion(), "loaded Groom extension");
     }
 
     /**
-     * Replaces known version placeholders in generated text.
+     * Resolves the version of the Groom extension currently loaded by Maven.
      *
-     * @param text    the text to process
-     * @param version the resolved version
+     * @return the loaded Groom extension version
+     * @throws MojoExecutionException when the embedded Maven metadata cannot be read
+     */
+    public static String resolveGroomVersion() throws MojoExecutionException {
+        String path = "/META-INF/maven/org.miaixz.maven/groom-maven-plugin/pom.properties";
+        Properties properties = new Properties();
+        try (InputStream input = GroomVersion.class.getResourceAsStream(path)) {
+            if (input == null) {
+                throw new MojoExecutionException("Missing Groom Maven metadata: " + path);
+            }
+            properties.load(input);
+        } catch (IOException e) {
+            throw new MojoExecutionException("Unable to read Groom Maven metadata: " + path, e);
+        }
+        return validate(properties.getProperty("version"), path);
+    }
+
+    /**
+     * Replaces project and Groom plugin version placeholders in generated text.
+     *
+     * @param text           the text to process
+     * @param projectVersion the resolved repository version
+     * @param groomVersion   the loaded Groom extension version
      * @return processed text
      */
-    public static String replacePlaceholders(String text, String version) {
+    public static String replacePlaceholders(String text, String projectVersion, String groomVersion) {
+        return replaceGroomVersionPlaceholder(
+                replaceProjectVersionPlaceholders(text, projectVersion), groomVersion);
+    }
+
+    /**
+     * Replaces repository project version placeholders in generated text.
+     *
+     * @param text           the text to process
+     * @param projectVersion the resolved repository version
+     * @return processed text
+     */
+    public static String replaceProjectVersionPlaceholders(String text, String projectVersion) {
         if (text == null) {
             return null;
         }
-        return text.replace("${revision}", version)
-                .replace("${project.version}", version)
-                .replace("${bus.version}", version)
-                .replace("${groom.version}", version);
+        return text.replace("${revision}", projectVersion)
+                .replace("${project.version}", projectVersion)
+                .replace("${bus.version}", projectVersion);
+    }
+
+    /**
+     * Replaces the Groom extension version placeholder in generated text.
+     *
+     * @param text         the text to process
+     * @param groomVersion the loaded Groom extension version
+     * @return processed text
+     */
+    public static String replaceGroomVersionPlaceholder(String text, String groomVersion) {
+        return text == null ? null : text.replace("${groom.version}", groomVersion);
     }
 
     /**
@@ -183,8 +228,27 @@ public final class GroomVersion {
      * @return {@code true} when the text contains a managed placeholder
      */
     public static boolean hasManagedPlaceholder(String text) {
-        return text != null && (text.contains("${revision}") || text.contains("${bus.version}")
-                || text.contains("${groom.version}"));
+        return hasProjectVersionPlaceholder(text) || hasGroomVersionPlaceholder(text);
+    }
+
+    /**
+     * Tests whether the text contains a managed repository project version placeholder.
+     *
+     * @param text the text to test
+     * @return {@code true} when the text contains a managed project version placeholder
+     */
+    public static boolean hasProjectVersionPlaceholder(String text) {
+        return text != null && (text.contains("${revision}") || text.contains("${bus.version}"));
+    }
+
+    /**
+     * Tests whether the text contains the Groom extension version placeholder.
+     *
+     * @param text the text to test
+     * @return {@code true} when the text contains the Groom extension version placeholder
+     */
+    public static boolean hasGroomVersionPlaceholder(String text) {
+        return text != null && text.contains("${groom.version}");
     }
 
     /**
@@ -203,18 +267,20 @@ public final class GroomVersion {
     }
 
     /**
-     * Writes a managed version property after validating that it does not conflict with the repository version.
+     * Writes a managed version property after validating that it does not conflict with its source.
      *
      * @param properties the property container to update.
      * @param name       the property name.
-     * @param version    the resolved repository version.
-     * @throws MojoExecutionException when an existing value conflicts with {@code VERSION}.
+     * @param version    the resolved version.
+     * @param source     the version source used in validation errors.
+     * @throws MojoExecutionException when an existing value conflicts with the resolved version.
      */
-    private static void put(Properties properties, String name, String version) throws MojoExecutionException {
+    private static void put(Properties properties, String name, String version, String source)
+            throws MojoExecutionException {
         String current = properties.getProperty(name);
         if (current != null && !current.isBlank() && !current.trim().equals(version)) {
-            throw new MojoExecutionException(
-                    "Maven property '" + name + "' is '" + current.trim() + "' but VERSION is '" + version + "'.");
+            throw new MojoExecutionException("Maven property '" + name + "' is '" + current.trim() + "' but "
+                    + source + " is '" + version + "'.");
         }
         properties.setProperty(name, version);
     }

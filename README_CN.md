@@ -117,13 +117,15 @@ mvn -Dgroom.updatePomFile=true -Dgroom.pomElements.buildPlugins=remove clean dep
 
 ### VERSION 文件支持
 
-当插件通过 `<extensions>true</extensions>` 作为 Maven 扩展加载时，会在 Maven 模型解析前读取最近的仓库 `VERSION` 文件，并注入以下版本属性：
+当插件通过 `<extensions>true</extensions>` 作为 Maven 扩展加载时，会在 Maven 模型解析前读取最近的仓库 `VERSION` 文件，并将项目版本注入以下属性：
 
 - `${revision}`
 - `${bus.version}`
-- `${groom.version}`
 
-版本值必须符合 Maven 发布版本格式，例如 `8.6.8`、`2.0.7` 或 `2.0.7-RC1`。
+从 `.mvn/extensions.xml` 加载的 Groom 扩展版本会注入 `${groom.version}`。
+Groom 始终根据已加载构件的元数据解析该占位符；它与仓库项目版本及 `resolveProjectVersion` 相互独立。
+
+仓库 `VERSION` 文件中的值必须符合 Maven 发布版本格式，例如 `8.6.8`、`2.0.7` 或 `2.0.7-RC1`。
 
 ### 项目表达式解析
 
@@ -145,7 +147,7 @@ mvn -Dgroom.updatePomFile=true -Dgroom.pomElements.buildPlugins=remove clean dep
 | `groomedPomFilename` / `groom.pom.filename` | `.groomed-pom.xml` | 生成 POM 的文件名。 |
 | `outputDirectory` | `${project.basedir}` | 生成 POM 的输出目录。 |
 | `updatePomFile` / `groom.updatePomFile` | `true` | 是否让当前 `MavenProject` 在后续生命周期中使用生成后的 POM。 |
-| `resolveProjectVersion` / `groom.resolveProjectVersion` | `false` | 在生成结果中解析 `${project.version}`、`${revision}`、`${bus.version}`、`${groom.version}`。 |
+| `resolveProjectVersion` / `groom.resolveProjectVersion` | `false` | 在生成结果中解析 `${project.version}`、`${revision}` 和 `${bus.version}`。 |
 | `resolveProjectExpressions` / `groom.resolveProjectExpressions` | `false` | 解析公开元数据字段中的 Maven 项目表达式。 |
 | `applyProjectElementRemovalsToPomPackaging` / `groom.applyProjectElementRemovalsToPomPackaging` | `true` | 对 `pom` 打包类型项目应用可移除 POM 元素处理规则。 |
 | `pomElements` | 取决于模式 | 按元素控制生成 POM 的内容处理方式。 |

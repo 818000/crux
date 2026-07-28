@@ -28,7 +28,7 @@ import org.apache.maven.execution.MavenSession;
 import org.apache.maven.plugin.MojoExecutionException;
 
 /**
- * Maven core extension that injects the repository {@code VERSION} value before project models are built.
+ * Maven core extension that injects repository and loaded Groom extension versions before project models are built.
  */
 @Named
 @Singleton
@@ -45,15 +45,15 @@ public class GroomVersionExtension extends AbstractMavenLifecycleParticipant {
      * Injects version properties into the Maven session.
      *
      * @param session the Maven session
-     * @throws MavenExecutionException when the repository version is missing or invalid
+     * @throws MavenExecutionException when a managed version is missing or invalid
      */
     @Override
     public void afterSessionStart(MavenSession session) throws MavenExecutionException {
         try {
-            GroomVersion.inject(session.getUserProperties(), GroomVersion.resolve(session));
+            GroomVersion.inject(session.getUserProperties(), GroomVersion.resolveProjectVersion(session));
         } catch (MojoExecutionException e) {
             throw new MavenExecutionException(e.getMessage(), e);
         }
     }
-    
+
 }

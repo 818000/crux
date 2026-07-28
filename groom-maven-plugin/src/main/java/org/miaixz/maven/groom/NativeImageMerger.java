@@ -175,16 +175,18 @@ final class NativeImageMerger {
         Set<String> allVersions = discoverAvailableVersions();
         log.info("Discovered versions: " + String.join(", ", allVersions));
 
-        Set<String> versionsToProcess = determineVersionsToProcess(allVersions, targetVersion);
-
+        Set<String> sourceVersions = determineVersionsToProcess(allVersions, targetVersion);
+        Set<String> outputVersions = new LinkedHashSet<>();
         boolean includeUnversionedTargetMetadata = targetVersion != null;
 
-        for (String version : versionsToProcess) {
-            log.info("=== Processing version " + version + " ===");
-            processVersion(version, includeUnversionedTargetMetadata && Objects.equals(version, targetVersion));
+        for (String sourceVersion : sourceVersions) {
+            String outputVersion = targetVersion == null ? sourceVersion : targetVersion;
+            log.info("=== Processing metadata version " + sourceVersion + " as " + outputVersion + " ===");
+            processVersion(sourceVersion, outputVersion, includeUnversionedTargetMetadata);
+            outputVersions.add(outputVersion);
         }
 
-        generateTopIndex(versionsToProcess, targetVersion);
+        generateTopIndex(outputVersions, targetVersion);
     }
 
     /**
@@ -208,21 +210,26 @@ final class NativeImageMerger {
     /**
      * Processes a specific version by consolidating all configuration files for that version.
      *
-     * @param version the version to process
+     * @param sourceVersion the metadata version to read
+     * @param outputVersion the project version directory to write
      * @param includeUnversionedTargetMetadata whether direct project metadata should be processed as this version
      * @throws IOException if file operations fail
      */
-    private void processVersion(String version, boolean includeUnversionedTargetMetadata) throws IOException {
-        Path outputPath = outputBaseDirectory.resolve(version);
+    private void processVersion(
+            String sourceVersion, String outputVersion, boolean includeUnversionedTargetMetadata) throws IOException {
+        Path outputPath = outputBaseDirectory.resolve(outputVersion);
         Files.createDirectories(outputPath);
 
-        log.info("Consolidating native-image configurations for version " + version + "...");
+        log.info("Consolidating native-image configurations from version " + sourceVersion + " into "
+                + outputVersion + "...");
 
-        Set<String> configurationTypes = discoverConfigurationFileTypes(version, includeUnversionedTargetMetadata);
+        Set<String> configurationTypes =
+                discoverConfigurationFileTypes(sourceVersion, includeUnversionedTargetMetadata);
         log.info("Discovered configuration types: " + String.join(", ", configurationTypes));
 
         for (String configType : configurationTypes) {
-            List<Path> configFiles = locateConfigurationFiles(version, configType, includeUnversionedTargetMetadata);
+            List<Path> configFiles =
+                    locateConfigurationFiles(sourceVersion, configType, includeUnversionedTargetMetadata);
 
             if (configFiles.isEmpty()) {
                 log.info("No " + configType + " files discovered");
@@ -236,7 +243,7 @@ final class NativeImageMerger {
         }
 
         // Generate consolidation statistics
-        displayConsolidationStatistics(version, outputPath, configurationTypes);
+        displayConsolidationStatistics(outputVersion, outputPath, configurationTypes);
     }
 
     /**

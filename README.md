@@ -117,13 +117,15 @@ This keeps local module builds functional while ensuring the published parent PO
 
 ### Version File Support
 
-When the plugin is loaded as a Maven extension with `<extensions>true</extensions>`, it can read the nearest repository `VERSION` file before Maven model resolution. The value is injected into:
+When the plugin is loaded as a Maven extension with `<extensions>true</extensions>`, it can read the nearest repository `VERSION` file before Maven model resolution. The repository version is injected into:
 
 - `${revision}`
 - `${bus.version}`
-- `${groom.version}`
 
-The value must match Maven release-style versions such as `8.6.8`, `2.0.7`, or `2.0.7-RC1`.
+The version of the Groom extension loaded from `.mvn/extensions.xml` is injected into `${groom.version}`.
+Groom always resolves this placeholder from its loaded artifact metadata; it is independent of the repository project version and `resolveProjectVersion`.
+
+The repository `VERSION` value must match a Maven release-style version such as `8.6.8`, `2.0.7`, or `2.0.7-RC1`.
 
 ### Project Expression Resolution
 
@@ -145,7 +147,7 @@ The plugin resolves public project metadata fields while leaving build plugin co
 | `groomedPomFilename` / `groom.pom.filename` | `.groomed-pom.xml` | Output file name for the generated POM. |
 | `outputDirectory` | `${project.basedir}` | Directory where the generated POM is written. |
 | `updatePomFile` / `groom.updatePomFile` | `true` | Whether the generated POM replaces the current `MavenProject` POM for later lifecycle goals. |
-| `resolveProjectVersion` / `groom.resolveProjectVersion` | `false` | Resolves `${project.version}`, `${revision}`, `${bus.version}`, and `${groom.version}` in generated output. |
+| `resolveProjectVersion` / `groom.resolveProjectVersion` | `false` | Resolves `${project.version}`, `${revision}`, and `${bus.version}` in generated output. |
 | `resolveProjectExpressions` / `groom.resolveProjectExpressions` | `false` | Resolves Maven project expressions in public metadata fields. |
 | `applyProjectElementRemovalsToPomPackaging` / `groom.applyProjectElementRemovalsToPomPackaging` | `true` | Applies removable POM element handling to projects packaged as `pom`. |
 | `pomElements` | Mode dependent | Element-by-element handling for generated POM content. |
